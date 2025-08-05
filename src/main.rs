@@ -36,8 +36,8 @@ struct Args {
 #[derive(Debug, Clone)]
 struct TableRow {
     chr: String,
-    start: i32,
-    end: i32,
+    start: u32,
+    end: u32,
     value: f64,
 }
 
@@ -61,15 +61,35 @@ fn main() -> io::Result<()> {
         None
     };
     
-    segment_file(
+    let output = segment_file(
         &args.input,
         args.median,
         args.penalty,
         None, // mask: optional, to be handled inside if needed,
         None
-    );
+    ).unwrap();
+
+
+    write_to_tsv(&output, args.output);
+
 
     
+    Ok(())
+}
+
+
+fn write_to_tsv(rows: &[TableRow], path: PathBuf) -> std::io::Result<()> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+
+    // Write header
+    writeln!(writer, "chr\tstart\tend\tvalue")?;
+
+    // Write each row
+    for row in rows {
+        writeln!(writer, "{}\t{}\t{}\t{}", row.chr, row.start, row.end, row.value)?;
+    }
+
     Ok(())
 }
 
@@ -78,7 +98,7 @@ fn segment_file(
     input: &PathBuf,
     est_median: u32,
     penalty: f64,
-    location_factors: Option<&Vec<f64>>,
+    location_factors: Option<&Vec<u32>>,
     mask: Option<&Vec<bool>>,
 ) -> io::Result<Vec<TableRow>> {
     
@@ -142,11 +162,12 @@ fn segment_file(
     let end = cols.get(2).unwrap_or(&"").trim().parse::<usize>().unwrap_or(0);
     let bin_size = if start == 0 { Some(end) } else { None };
 
-    let mut chrom_data: HashMap<String, (Vec<i32>, Vec<i32>, Vec<i32>)> = HashMap::new();
+    //let mut chrom_data: HashMap<String, (Vec<u32>, Vec<u32>, Vec<u32>)> = HashMap::new();
+    let mut chrom_data: Vec<(String, (Vec<u32>, Vec<u32>, Vec<u32>))> = Vec::new();
 
     // Create and preallocate vectors
     let mut starts = Vec::new();
-    let mut ends = Vec::new();
+    let mut ends   = Vec::new();
     let mut values = Vec::new();
     
     let mut median_helper = [0u32; 1000];
@@ -163,7 +184,7 @@ fn segment_file(
     
     let mut result_table: Vec<TableRow> = Vec::new();
 
-    // Process remaining lines
+    // Process data lines
     for (line_num, line_result) in lines.enumerate() {
         let line = line_result?;
         let columns: Vec<&str> = line.split('\t').collect();
@@ -174,14 +195,16 @@ fn segment_file(
         }
 
         let chr = columns[0].trim();
-        let start = columns[1].trim().parse::<i32>();
-        let end = columns[2].trim().parse::<i32>();
-        let value = columns[3].trim().parse::<f64>();
 
         // Detect chromosome change
         if chr != prev_chr {
             // Save previous chromosome data
-            chrom_data.insert(prev_chr.clone(), (starts, ends, values));
+
+            if !chrom_sizes.contains_key(chr) {
+            continue; // Skip this iteration if key is not found.
+            }
+
+            chrom_data.push((prev_chr.clone(), (starts, ends, values)));
             println!("Chromosome changed: {} → {}", prev_chr, chr);
 
             // Create new vectors for the new chromosome
@@ -200,12 +223,16 @@ fn segment_file(
             prev_chr = chr.to_string();
         }
 
-        match (start, end, value) {
+        let start = columns[1].trim().parse::<u32>();
+        let end = columns[2].trim().parse::<u32>();
+        let value = columns[3].trim().split('.').next().unwrap().parse::<u32>();
+
+        match (start, end, value.clone()) {
             (Ok(s), Ok(e), Ok(v)) => {
                 let index = v as usize;
                 starts.push(s);
                 ends.push(e);
-                values.push(index as i32);
+                values.push(v);
                 element_count += 1;
                 if index < 1000 {
                     median_helper[index] += 1;
@@ -218,7 +245,8 @@ fn segment_file(
             }
         }
     }
-    chrom_data.insert(prev_chr, (starts, ends, values));
+
+    chrom_data.push((prev_chr, (starts, ends, values)));
 
     // --- Median calculation ---
     let mut cumulative = 0;
@@ -227,7 +255,7 @@ fn segment_file(
     for (i, count) in median_helper.iter().enumerate() {
         cumulative += count;
         if cumulative as f64 >= element_count as f64 / 2.0 {
-            median = i as i32;
+            median = i as u32;
             break;
         }
     }
@@ -251,24 +279,21 @@ fn segment_file(
         let use_entry = mask.map_or(true, |m| m[i]); // If mask is None, include all entries
 
         if use_entry {
-            let raw_val = values[i] as f64;
+            let raw_val = values[i] * 100;
             let normalized = match location_factors {
-                Some(factors) => raw_val / median as f64 / factors[loc_idx],
-                None => raw_val / median as f64,
+                Some(factors) => raw_val / median / factors[loc_idx],
+                None => raw_val / median,
             };
 
-            // Multiply and round, keep as integer
-            let rounded_int = (normalized * 100.0).round() as usize;
-
-            if rounded_int < MAX_BUCKETS {
-                bucket_flags[rounded_int] = 1;
+            if (normalized as usize) < MAX_BUCKETS {
+                bucket_flags[normalized as usize] = 1;
             } else {
-                overflow_values.push(rounded_int);
+                overflow_values.push(normalized as usize);
             }
 
             masked_starts.push(starts[i]);
             masked_ends.push(ends[i]);
-            norm_values.push(rounded_int as f64 / 100.0);
+            norm_values.push(normalized as f64 / 100.0);
 
             loc_idx += 1;
         }
