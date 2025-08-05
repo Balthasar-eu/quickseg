@@ -44,9 +44,25 @@ struct TableRow {
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
+    let normal_result: Option<Vec<TableRow>> = if let Some(normal_path) = &args.normal {
+        if normal_path.is_file() {
+            Some(segment_file(
+                normal_path,
+                args.median,
+                args.penalty,
+                None,
+                None,
+            )?)
+        } else {
+            eprintln!("Provided --normal path is not a valid file: {:?}", normal_path);
+            None
+        }
+    } else {
+        None
+    };
+    
     segment_file(
         &args.input,
-        &args.output,
         args.median,
         args.penalty,
         None, // mask: optional, to be handled inside if needed,
@@ -60,8 +76,7 @@ fn main() -> io::Result<()> {
 
 fn segment_file(
     input: &PathBuf,
-    output: &PathBuf,
-    median: u32,
+    est_median: u32,
     penalty: f64,
     location_factors: Option<&Vec<f64>>,
     mask: Option<&Vec<bool>>,
@@ -99,7 +114,7 @@ fn segment_file(
     let mut reader = BufReader::new(&file);
 
     // Read first and second line and save their byte offsets
-    let mut first_pos = reader.stream_position()?;
+    let first_pos = reader.stream_position()?;
     let mut first_line = String::new();
     reader.read_line(&mut first_line)?;
     let second_pos = reader.stream_position()?;
@@ -116,7 +131,7 @@ fn segment_file(
     let seek_to = if has_header { second_pos } else { first_pos };
     file.seek(SeekFrom::Start(seek_to))?;
     let reader = BufReader::new(file);
-    let mut lines = reader.lines();
+    let lines = reader.lines();
 
     // Determine bin size and starting chromosome
     let header_line = if has_header { &second_line } else { &first_line };
@@ -147,9 +162,6 @@ fn segment_file(
     let mut prev_chr = chr;
     
     let mut result_table: Vec<TableRow> = Vec::new();
-
-    let outfile = File::create(output)?;
-    let mut writer = BufWriter::new(outfile);
 
     // Process remaining lines
     for (line_num, line_result) in lines.enumerate() {
@@ -280,19 +292,6 @@ fn segment_file(
     };
     out_index.truncate(outsize as usize);
     out_values.truncate(outsize as usize);
-    
-    // Write output to TSV
-    for i in 0..out_index.len() {
-        let start = starts[out_index[i] as usize];
-        let end = if i + 1 < out_index.len() {
-            ends[out_index[i + 1] as usize]
-        } else {
-            *ends.last().unwrap()
-        };
-        let value = out_values[i];
-
-        writeln!(writer, "{}\t{}\t{}\t{}", chr, start, end, value)?;
-    }
     
     for i in 0..out_index.len() {
         let start = masked_starts[out_index[i] as usize];
