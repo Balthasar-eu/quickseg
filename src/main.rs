@@ -33,6 +33,14 @@ struct Args {
     exclude: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+struct TableRow {
+    chr: String,
+    start: i32,
+    end: i32,
+    value: f64,
+}
+
 fn main() -> io::Result<()> {
     let args = Args::parse();
 
@@ -41,7 +49,8 @@ fn main() -> io::Result<()> {
         &args.output,
         args.median,
         args.penalty,
-        None, // mask: optional, to be handled inside if needed
+        None, // mask: optional, to be handled inside if needed,
+        None
     );
 
     
@@ -54,8 +63,9 @@ fn segment_file(
     output: &PathBuf,
     median: u32,
     penalty: f64,
+    location_factors: Option<&Vec<f64>>,
     mask: Option<&Vec<bool>>,
-) -> io::Result<()> {
+) -> io::Result<Vec<TableRow>> {
     
     let chrom_sizes: HashMap<&str, usize> = [
         ("chr1", 249_000_000), ("1", 249_000_000),
@@ -136,6 +146,7 @@ fn segment_file(
 
     let mut prev_chr = chr;
     
+    let mut result_table: Vec<TableRow> = Vec::new();
 
     let outfile = File::create(output)?;
     let mut writer = BufWriter::new(outfile);
@@ -212,34 +223,96 @@ fn segment_file(
     // --- Normalize and pass to x() ---
     for (chr, (starts, ends, values)) in &chrom_data {
 
-        let mut norm_values: Vec<f64> = values.iter()
-            .map(|v| *v as f64 / median as f64)
-            .collect();
+    // Constants
+    const MAX_BUCKETS: usize = 1000;
 
-        let mut out_index = vec![0; norm_values.len()];
-        let mut out_values = vec![0.0f64; norm_values.len()];
-        let segvalues = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 300.0];
-        let outsize = unsafe {
-            segment(norm_values.as_ptr(), norm_values.len(),  segvalues.as_ptr(), segvalues.len(), 10.0, out_index.as_mut_ptr(), out_values.as_mut_ptr())
-        };
-        out_index.truncate(outsize as usize);
-        out_values.truncate(outsize as usize);
-        
-        // Write output to TSV
-        for i in 0..out_index.len() {
-            let start = starts[out_index[i] as usize];
-            let end = if i + 1 < out_index.len() {
-                ends[out_index[i + 1] as usize]
-            } else {
-                *ends.last().unwrap()
+    // Prepare data structures
+    let mut masked_starts = Vec::with_capacity(values.len());
+    let mut masked_ends = Vec::with_capacity(values.len());
+    let mut norm_values = Vec::with_capacity(values.len());
+    let mut bucket_flags = [0u8; MAX_BUCKETS]; // Used as bitmap for unique values
+    let mut overflow_values = Vec::new();
+
+    let mut loc_idx = 0;
+
+    for i in 0..values.len() {
+        let use_entry = mask.map_or(true, |m| m[i]); // If mask is None, include all entries
+
+        if use_entry {
+            let raw_val = values[i] as f64;
+            let normalized = match location_factors {
+                Some(factors) => raw_val / median as f64 / factors[loc_idx],
+                None => raw_val / median as f64,
             };
-            let value = out_values[i];
 
-            writeln!(writer, "{}\t{}\t{}\t{}", chr, start, end, value)?;
+            // Multiply and round, keep as integer
+            let rounded_int = (normalized * 100.0).round() as usize;
+
+            if rounded_int < MAX_BUCKETS {
+                bucket_flags[rounded_int] = 1;
+            } else {
+                overflow_values.push(rounded_int);
+            }
+
+            masked_starts.push(starts[i]);
+            masked_ends.push(ends[i]);
+            norm_values.push(rounded_int as f64 / 100.0);
+
+            loc_idx += 1;
         }
+    }
+
+    // Extract unique values (already "sorted" by index)
+    let mut seg_values: Vec<f64> = bucket_flags
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &flag)| if flag == 1 { Some(i as f64 / 100.0) } else { None })
+        .collect();
+
+    overflow_values.sort_unstable();
+    overflow_values.dedup();
+    seg_values.extend(overflow_values.iter().map(|&v| v as f64 / 100.0));
+        
+    let mut out_index = vec![0; norm_values.len()];
+    let mut out_values = vec![0.0f64; norm_values.len()];
+    let outsize = unsafe {
+        segment(norm_values.as_ptr(), norm_values.len(),  seg_values.as_ptr(), seg_values.len(), penalty, out_index.as_mut_ptr(), out_values.as_mut_ptr())
+    };
+    out_index.truncate(outsize as usize);
+    out_values.truncate(outsize as usize);
+    
+    // Write output to TSV
+    for i in 0..out_index.len() {
+        let start = starts[out_index[i] as usize];
+        let end = if i + 1 < out_index.len() {
+            ends[out_index[i + 1] as usize]
+        } else {
+            *ends.last().unwrap()
+        };
+        let value = out_values[i];
+
+        writeln!(writer, "{}\t{}\t{}\t{}", chr, start, end, value)?;
+    }
+    
+    for i in 0..out_index.len() {
+        let start = masked_starts[out_index[i] as usize];
+        let end = if i + 1 < out_index.len() {
+            masked_ends[out_index[i + 1] as usize]
+        } else {
+            *masked_ends.last().unwrap()
+        };
+        let value = out_values[i];
+
+        result_table.push(TableRow {
+            chr: chr.clone(),
+            start,
+            end,
+            value,
+        });
+    }
         
     }
-    Ok(())
+    Ok(result_table)
 }
 
 
