@@ -51,7 +51,6 @@ fn main() -> io::Result<()> {
                 args.median,
                 args.penalty,
                 None,
-                None,
             )?)
         } else {
             eprintln!("Provided --normal path is not a valid file: {:?}", normal_path);
@@ -60,17 +59,16 @@ fn main() -> io::Result<()> {
     } else {
         None
     };
-    
+
     let output = segment_file(
         &args.input,
         args.median,
         args.penalty,
-        None, // mask: optional, to be handled inside if needed,
-        None
+        normal_result
     ).unwrap();
 
 
-    write_to_tsv(&output, args.output);
+    let _ = write_to_tsv(&output, args.output);
 
 
     
@@ -98,8 +96,7 @@ fn segment_file(
     input: &PathBuf,
     est_median: u32,
     penalty: f64,
-    location_factors: Option<&Vec<u32>>,
-    mask: Option<&Vec<bool>>,
+    normal_segments: Option<Vec<TableRow>>,
 ) -> io::Result<Vec<TableRow>> {
     
     let chrom_sizes: HashMap<&str, usize> = [
@@ -233,12 +230,14 @@ fn segment_file(
                 starts.push(s);
                 ends.push(e);
                 values.push(v);
-                element_count += 1;
-                if index < 1000 {
-                    median_helper[index] += 1;
-                } else {
-                    eprintln!("Value index {} out of range at line {}", index, line_num + 1);
-                }
+                //if !["chrX", "X", "chrY", "Y"].contains(&chr) {
+                    element_count += 1;
+                    if index < 1000 {
+                        median_helper[index] += 1;
+                    } else {
+                        eprintln!("Value index {} out of range at line {}", index, line_num + 1);
+                    }
+                //}
             }
             _ => {
                 eprintln!("Invalid number at line {}", line_num + 1);
@@ -259,45 +258,57 @@ fn segment_file(
             break;
         }
     }
+    eprintln!("Median {}", median);
 
+    let mut loc_idx = 0;
     // --- Normalize and pass to x() ---
     for (chr, (starts, ends, values)) in &chrom_data {
 
-    // Constants
-    const MAX_BUCKETS: usize = 1000;
+        // Constants
+        const MAX_BUCKETS: usize = 1000;
 
-    // Prepare data structures
-    let mut masked_starts = Vec::with_capacity(values.len());
-    let mut masked_ends = Vec::with_capacity(values.len());
-    let mut norm_values = Vec::with_capacity(values.len());
-    let mut bucket_flags = [0u8; MAX_BUCKETS]; // Used as bitmap for unique values
-    let mut overflow_values = Vec::new();
+        // Prepare data structures
+        let mut masked_starts = Vec::with_capacity(values.len());
+        let mut masked_ends = Vec::with_capacity(values.len());
+        let mut norm_values = Vec::with_capacity(values.len());
+        let mut bucket_flags = [0u8; MAX_BUCKETS]; // Used as bitmap for unique values
+        let mut overflow_values = Vec::new();
 
-    let mut loc_idx = 0;
+        //normal_segments[loc_idx].value
+        for i in 0..values.len() {
 
-    for i in 0..values.len() {
-        let use_entry = mask.map_or(true, |m| m[i]); // If mask is None, include all entries
-
-        if use_entry {
             let raw_val = values[i] * 100;
-            let normalized = match location_factors {
-                Some(factors) => raw_val / median / factors[loc_idx],
-                None => raw_val / median,
+            let normalized = match normal_segments {
+                Some(ref normal_segments) => {
+                    if *chr != normal_segments[loc_idx].chr {
+                        loc_idx += 1;
+                    }
+                    if starts[i] >= normal_segments[loc_idx].end {
+                        loc_idx += 1;
+                    }
+                    let normal_val = normal_segments[loc_idx].value;
+                    if normal_val > 0.3 {
+                        Some( (raw_val * 100) / median / ((normal_val * 100.0) as u32) )
+                    } else {
+                        None
+                    }
+                }
+                None => Some(raw_val / median),
             };
 
-            if (normalized as usize) < MAX_BUCKETS {
-                bucket_flags[normalized as usize] = 1;
-            } else {
-                overflow_values.push(normalized as usize);
+
+            if let Some(val) = normalized {
+                if (val as usize) < MAX_BUCKETS {
+                    bucket_flags[val as usize] = 1;
+                } else {
+                    overflow_values.push(val as usize);
+                }
+
+                masked_starts.push(starts[i]);
+                masked_ends.push(ends[i]);
+                norm_values.push(val as f64 / 100.0);
             }
-
-            masked_starts.push(starts[i]);
-            masked_ends.push(ends[i]);
-            norm_values.push(normalized as f64 / 100.0);
-
-            loc_idx += 1;
         }
-    }
 
     // Extract unique values (already "sorted" by index)
     let mut seg_values: Vec<f64> = bucket_flags
@@ -321,7 +332,7 @@ fn segment_file(
     for i in 0..out_index.len() {
         let start = masked_starts[out_index[i] as usize];
         let end = if i + 1 < out_index.len() {
-            masked_ends[out_index[i + 1] as usize]
+            masked_starts[out_index[i + 1] as usize] - 1
         } else {
             *masked_ends.last().unwrap()
         };
