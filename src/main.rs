@@ -114,6 +114,7 @@ fn open_reader(path: &PathBuf) -> std::io::Result<BufReader<Box<dyn Read>>> {
     };
 
     Ok(BufReader::new(reader))
+    // Ok(BufReader::with_capacity(1024 * 1024, reader))
 }
 
 
@@ -201,11 +202,15 @@ fn segment_file(
         let mut dummy = String::new();
         reader.read_line(&mut dummy)?; // consumes the first line
     }
+
     let lines = reader.lines();
 
     // Process data lines
     for (line_num, line_result) in lines.enumerate() {
         let line = line_result?;
+
+        // TODO: This could possibly be better, but different things I tried either made performance worse or did nothing.
+        // read_line instead of lines ~5 times slower, for whatever reason.
         let columns: Vec<&str> = line.split('\t').collect();
 
         if columns.len() < 4 {
