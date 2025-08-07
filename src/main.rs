@@ -1,8 +1,13 @@
 use clap::Parser;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, BufRead, Write, BufWriter, BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead, Read, Write, BufWriter, BufReader};
 use std::path::PathBuf;
+use flate2::read::MultiGzDecoder;
+
+macro_rules! debug_println {
+    ($($arg:tt)*) => (if ::std::cfg!(debug_assertions) { ::std::println!($($arg)*); })
+}
 
 /// Program to process BED-like file and count values by position
 #[derive(Parser, Debug)]
@@ -18,11 +23,15 @@ struct Args {
 
     /// Optional normal sample input file
     #[arg(long, value_name = "FILE", value_parser = clap::value_parser!(PathBuf))]
+    normalout: Option<PathBuf>,
+
+    /// Optional normal sample input file
+    #[arg(long, value_name = "FILE", value_parser = clap::value_parser!(PathBuf))]
     normal: Option<PathBuf>,
 
     /// Expected median (default: 1000)
     #[arg(long, default_value_t = 1000)]
-    median: u32,
+    median: usize,
 
     /// Penalty parameter (default: 10.0)
     #[arg(long, default_value_t = 10.0)]
@@ -51,6 +60,8 @@ fn main() -> io::Result<()> {
                 args.median,
                 args.penalty,
                 None,
+                None, // Some(&PathBuf::from("normal.tsv"))
+                true,
             )?)
         } else {
             eprintln!("Provided --normal path is not a valid file: {:?}", normal_path);
@@ -64,14 +75,14 @@ fn main() -> io::Result<()> {
         &args.input,
         args.median,
         args.penalty,
-        normal_result
+        normal_result,
+        args.normalout.as_ref(),
+        false,
     ).unwrap();
 
 
     let _ = write_to_tsv(&output, args.output);
 
-
-    
     Ok(())
 }
 
@@ -85,18 +96,35 @@ fn write_to_tsv(rows: &[TableRow], path: PathBuf) -> std::io::Result<()> {
 
     // Write each row
     for row in rows {
-        writeln!(writer, "{}\t{}\t{}\t{}", row.chr, row.start, row.end, row.value)?;
+        writeln!(writer, "{}\t{}\t{}\t{:.2}", row.chr, row.start, row.end, row.value)?;
     }
 
     Ok(())
 }
 
 
+
+fn open_reader(path: &PathBuf) -> std::io::Result<BufReader<Box<dyn Read>>> {
+    let file = File::open(path)?;
+
+    let reader: Box<dyn Read> = if path.extension().map_or(false, |ext| ext == "gz") {
+        Box::new(MultiGzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+
+    Ok(BufReader::new(reader))
+}
+
+
+
 fn segment_file(
     input: &PathBuf,
-    est_median: u32,
+    est_median: usize,
     penalty: f64,
     normal_segments: Option<Vec<TableRow>>,
+    valuefile: Option<&PathBuf>,
+    normal: bool,
 ) -> io::Result<Vec<TableRow>> {
     
     let chrom_sizes: HashMap<&str, usize> = [
@@ -126,15 +154,11 @@ fn segment_file(
         ("chrY", 57_300_000), ("Y", 57_300_000),
     ].into_iter().collect();
 
-    // Open file with seek support
-    let mut file = File::open(input)?;
-    let mut reader = BufReader::new(&file);
+    let mut reader  = open_reader(&input)?;
 
     // Read first and second line and save their byte offsets
-    let first_pos = reader.stream_position()?;
     let mut first_line = String::new();
     reader.read_line(&mut first_line)?;
-    let second_pos = reader.stream_position()?;
     let mut second_line = String::new();
     reader.read_line(&mut second_line)?;
 
@@ -144,22 +168,15 @@ fn segment_file(
         col2.parse::<i32>().is_err()
     };
 
-    // Reset file position
-    let seek_to = if has_header { second_pos } else { first_pos };
-    file.seek(SeekFrom::Start(seek_to))?;
-    let reader = BufReader::new(file);
-    let lines = reader.lines();
-
     // Determine bin size and starting chromosome
     let header_line = if has_header { &second_line } else { &first_line };
     let cols: Vec<&str> = header_line.split('\t').collect();
 
-    let chr = cols.get(0).unwrap_or(&"").trim().to_string();
+    let mut prev_chr = cols.get(0).unwrap_or(&"").trim().to_string();
     let start = cols.get(1).unwrap_or(&"").trim().parse::<usize>().unwrap_or(0);
     let end = cols.get(2).unwrap_or(&"").trim().parse::<usize>().unwrap_or(0);
     let bin_size = if start == 0 { Some(end) } else { None };
 
-    //let mut chrom_data: HashMap<String, (Vec<u32>, Vec<u32>, Vec<u32>)> = HashMap::new();
     let mut chrom_data: Vec<(String, (Vec<u32>, Vec<u32>, Vec<u32>))> = Vec::new();
 
     // Create and preallocate vectors
@@ -167,19 +184,24 @@ fn segment_file(
     let mut ends   = Vec::new();
     let mut values = Vec::new();
     
-    let mut median_helper = [0u32; 1000];
+    let mut median_helper = vec![0u32; est_median];
     let mut element_count = 0;
 
-    if let (Some(bs), Some(&chr_len)) = (bin_size, chrom_sizes.get(chr.as_str())) {
+    if let (Some(bs), Some(&chr_len)) = (bin_size, chrom_sizes.get(prev_chr.as_str())) {
         let bins = (chr_len + bs - 1) / bs;
         starts.reserve(bins);
         ends.reserve(bins);
         values.reserve(bins);
     }
 
-    let mut prev_chr = chr;
-    
     let mut result_table: Vec<TableRow> = Vec::new();
+
+    let mut reader  = open_reader(&input)?;
+    if has_header {
+        let mut dummy = String::new();
+        reader.read_line(&mut dummy)?; // consumes the first line
+    }
+    let lines = reader.lines();
 
     // Process data lines
     for (line_num, line_result) in lines.enumerate() {
@@ -202,7 +224,7 @@ fn segment_file(
             }
 
             chrom_data.push((prev_chr.clone(), (starts, ends, values)));
-            println!("Chromosome changed: {} → {}", prev_chr, chr);
+            debug_println!("Chromosome changed: {} → {}", prev_chr, chr);
 
             // Create new vectors for the new chromosome
             if let (Some(bs), Some(&chr_len)) = (bin_size, chrom_sizes.get(chr)) {
@@ -210,7 +232,7 @@ fn segment_file(
                 starts = Vec::with_capacity(bins);
                 ends = Vec::with_capacity(bins);
                 values = Vec::with_capacity(bins);
-                println!("Preallocated {} bins for {} (bin size {})", bins, chr, bs);
+                debug_println!("Preallocated {} bins for {} (bin size {})", bins, chr, bs);
             } else {
                 starts = Vec::new();
                 ends = Vec::new();
@@ -230,14 +252,14 @@ fn segment_file(
                 starts.push(s);
                 ends.push(e);
                 values.push(v);
-                //if !["chrX", "X", "chrY", "Y"].contains(&chr) {
+                if !["chrX", "X", "chrY", "Y"].contains(&chr) {
                     element_count += 1;
-                    if index < 1000 {
+                    if index < est_median {
                         median_helper[index] += 1;
                     } else {
-                        eprintln!("Value index {} out of range at line {}", index, line_num + 1);
+                        debug_println!("Value {} larger than estimated median {} at line {}", index, est_median, line_num + 1);
                     }
-                //}
+                }
             }
             _ => {
                 eprintln!("Invalid number at line {}", line_num + 1);
@@ -258,21 +280,23 @@ fn segment_file(
             break;
         }
     }
-    eprintln!("Median {}", median);
+    debug_println!("Median {}", median);
 
-    let mut loc_idx = 0;
     // --- Normalize and pass to x() ---
-    for (chr, (starts, ends, values)) in &chrom_data {
+    let mut loc_idx = 0;
 
-        // Constants
-        const MAX_BUCKETS: usize = 1000;
 
-        // Prepare data structures
-        let mut masked_starts = Vec::with_capacity(values.len());
-        let mut masked_ends = Vec::with_capacity(values.len());
-        let mut norm_values = Vec::with_capacity(values.len());
-        let mut bucket_flags = [0u8; MAX_BUCKETS]; // Used as bitmap for unique values
+    let mut writerx = match valuefile {
+        Some(valuefile) => Some(BufWriter::new(File::create(valuefile)?)),
+        None => None,
+    };
+
+
+    for (chr, (starts, ends, values)) in chrom_data.iter_mut() {
+
+        median_helper.fill(0);
         let mut overflow_values = Vec::new();
+        let mut newi = 0;
 
         //normal_segments[loc_idx].value
         for i in 0..values.len() {
@@ -287,7 +311,7 @@ fn segment_file(
                         loc_idx += 1;
                     }
                     let normal_val = normal_segments[loc_idx].value;
-                    if normal_val > 0.3 {
+                    if normal_val > 0.33 && normal_val < 3.00 {
                         Some( (raw_val * 100) / median / ((normal_val * 100.0) as u32) )
                     } else {
                         None
@@ -298,20 +322,36 @@ fn segment_file(
 
 
             if let Some(val) = normalized {
-                if (val as usize) < MAX_BUCKETS {
-                    bucket_flags[val as usize] = 1;
+                if (val as usize) < est_median {
+                    median_helper[val as usize] = 1;
                 } else {
-                    overflow_values.push(val as usize);
+                    overflow_values.push(val as u32);
+                    debug_println!("Value overflow {}", val);
                 }
 
-                masked_starts.push(starts[i]);
-                masked_ends.push(ends[i]);
-                norm_values.push(val as f64 / 100.0);
+                if i != newi {
+                    starts[newi] = starts[i];
+                    ends[newi] = ends[i];
+                }
+                values[newi] = val;
+                newi += 1;
             }
         }
 
+    starts.truncate(newi);
+    ends.truncate(newi);
+    values.truncate(newi);
+
+    // Write each row
+    match writerx {
+        Some(ref mut writerx) => for i in 0..newi { writeln!(writerx, "{}\t{}\t{}\t{}", chr, starts[i], ends[i], values[i])?;}
+        None => debug_println!("No output"),
+    }
+
+    let norm_values: Vec<f64> = values.iter().map(|&v| v as f64 / 100.0).collect();
+
     // Extract unique values (already "sorted" by index)
-    let mut seg_values: Vec<f64> = bucket_flags
+    let mut seg_values: Vec<f64> = median_helper
         .iter()
         .enumerate()
         .filter_map(|(i, &flag)| if flag == 1 { Some(i as f64 / 100.0) } else { None })
@@ -330,13 +370,17 @@ fn segment_file(
     out_values.truncate(outsize as usize);
     
     for i in 0..out_index.len() {
-        let start = masked_starts[out_index[i] as usize];
+        let start = starts[out_index[i] as usize];
         let end = if i + 1 < out_index.len() {
-            masked_starts[out_index[i + 1] as usize] - 1
+            starts[out_index[i + 1] as usize] - 1
         } else {
-            *masked_ends.last().unwrap()
+            *ends.last().unwrap()
         };
-        let value = out_values[i];
+        let value = if normal && (chr == "chrX" || chr == "X" || chr == "chrY" || chr == "Y") {
+             2.0 * out_values[i]
+        } else {
+            out_values[i]
+        };
 
         result_table.push(TableRow {
             chr: chr.clone(),
