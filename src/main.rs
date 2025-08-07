@@ -9,11 +9,11 @@ macro_rules! debug_println {
     ($($arg:tt)*) => (if ::std::cfg!(debug_assertions) { ::std::println!($($arg)*); })
 }
 
-/// Program to process BED-like file and count values by position
+/// Segment read counts into copy number segments
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 struct Args {
-    /// Input file in TSV format
+    /// Input file in TSV format. Needs to be in bed format with the fourth column as counts. You can use the output of mosdepth for this.
     #[arg(short, long, value_name = "FILE", value_parser = clap::value_parser!(PathBuf))]
     input: PathBuf,
 
@@ -21,7 +21,7 @@ struct Args {
     #[arg(short, long, value_name = "FILE", value_parser = clap::value_parser!(PathBuf))]
     output: PathBuf,
 
-    /// Optional normal sample input file
+    /// Optional output file for normalized counts that are used for segmenting. Useful for plotting or troubleshooting.
     #[arg(long, value_name = "FILE", value_parser = clap::value_parser!(PathBuf))]
     normalout: Option<PathBuf>,
 
@@ -29,15 +29,15 @@ struct Args {
     #[arg(long, value_name = "FILE", value_parser = clap::value_parser!(PathBuf))]
     normal: Option<PathBuf>,
 
-    /// Expected median (default: 1000)
+    /// Expected median. This needs to be higher than the median value of the raw counts. Increase if you use panel or amplicon sequencing. (default: 1000)
     #[arg(long, default_value_t = 1000)]
     median: usize,
 
-    /// Penalty parameter (default: 10.0)
+    /// Penalty parameter for segmentation. Lower values -> more segments. Higher values -> less segments (default: 10.0)
     #[arg(long, default_value_t = 10.0)]
     penalty: f64,
 
-    /// Optional exclusion file for masking
+    /// Optional exclusion file for masking. Not implemented yet :(
     #[arg(long, value_name = "FILE", value_parser = clap::value_parser!(PathBuf))]
     exclude: Option<PathBuf>,
 }
