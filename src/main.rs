@@ -382,6 +382,7 @@ fn segment_file(
     let mut out_values = vec![0.0f64; n];
 
     let mut score = vec![0.0f64; s];
+    // TODO: this should probably be a bitarray
     let mut backbool = vec![false; s*n];
 
     let mut backidx = vec![0; n];
