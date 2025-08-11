@@ -16,6 +16,7 @@ name = "quickseg"
 path = "src/main.rs"
 
 [profile.release]
+panic = "abort"
 codegen-units = 1
 lto = "fat"
 strip = true
