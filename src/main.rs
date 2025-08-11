@@ -349,7 +349,9 @@ fn segment_file(
 
     // Write each row
     match writerx {
-        Some(ref mut writerx) => for i in 0..newi { writeln!(writerx, "{}\t{}\t{}\t{}", chr, starts[i], ends[i], values[i])?;}
+        Some(ref mut writerx) => { for i in 0..newi {writeln!(writerx, "{}\t{}\t{}\t{}", chr, starts[i], ends[i], values[i])?;}
+        writerx.flush()?;
+        }
         None => debug_println!("No output"),
     }
 
@@ -365,14 +367,85 @@ fn segment_file(
     overflow_values.sort_unstable();
     overflow_values.dedup();
     seg_values.extend(overflow_values.iter().map(|&v| v as f64 / 100.0));
-        
-    let mut out_index = vec![0; norm_values.len()];
-    let mut out_values = vec![0.0f64; norm_values.len()];
-    let outsize = unsafe {
-        segment(norm_values.as_ptr(), norm_values.len(),  seg_values.as_ptr(), seg_values.len(), penalty, out_index.as_mut_ptr(), out_values.as_mut_ptr())
-    };
-    out_index.truncate(outsize as usize);
-    out_values.truncate(outsize as usize);
+
+    debug_println!("Segmentation {}", chr);
+
+    let n = norm_values.len();
+    let s = seg_values.len();
+
+    if n == 0 {
+        eprintln!("Skipping chromosome {}: no values after filtering", chr);
+        continue;
+    }
+
+    let mut out_index = vec![0; n];
+    let mut out_values = vec![0.0f64; n];
+
+    let mut score = vec![0.0f64; s];
+    let mut backbool = vec![false; s*n];
+
+    let mut backidx = vec![0; n];
+    let mut breakidx = vec![0; n];
+
+    score[0] = (norm_values[0] - seg_values[0]).abs();
+    let mut minscore = score[0];
+
+    for j in 1..s {
+        score[j] = (norm_values[0] - seg_values[j]).abs();
+
+        if minscore > score[j] {
+            minscore = score[j];
+            backidx[0] = j;
+        }
+    }
+
+    minscore += penalty;
+
+    for i in 1..n {
+        if minscore < score[0] {
+            backbool[s*i] = true;
+            score[0] = minscore;
+        }
+        score[0] +=  (norm_values[i] - seg_values[0]).abs();
+        let mut jmin = score[0];
+
+        for j in 1..s {
+            if minscore < score[j] {
+                backbool[s*i+j] = true;
+                score[j] = minscore;
+            }
+            score[j] += (norm_values[i] - seg_values[j]).abs();
+
+            if jmin > score[j] {
+                jmin = score[j];
+                backidx[i] = j;
+            }
+        }
+
+        minscore = jmin + penalty;
+    }
+
+    let mut b = 1;
+    breakidx[0] = n;
+    let mut maxixtmp = backidx[n-1];
+    for i in (1..n).rev()  {
+        if backbool[i*s+maxixtmp] {
+            maxixtmp = backidx[i-1];
+            breakidx[b] = i;
+            b += 1;
+        }
+    }
+
+    out_index[0] = 0;
+    out_values[0] = seg_values[backidx[breakidx[b-1]-1]];
+
+    for i in (0..b-1).rev() {
+        out_index[b-(i+1)] = breakidx[i+1];
+        out_values[b-(i+1)] = seg_values[backidx[breakidx[i]-1]];
+    }
+
+    out_index.truncate(b as usize);
+    out_values.truncate(b as usize);
     
     for i in 0..out_index.len() {
         let start = starts[out_index[i] as usize];
@@ -399,15 +472,3 @@ fn segment_file(
     Ok(result_table)
 }
 
-
-unsafe extern "C" {
-    fn segment(
-        val_values: *const f64,
-        n: usize,
-        seg_values: *const f64,
-        s: usize,
-        penalty: f64,
-        out_index: *mut i32,
-        out_values: *mut f64,
-    ) -> i32;
-}
