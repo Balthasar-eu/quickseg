@@ -29,11 +29,11 @@ struct Args {
     #[arg(long, value_name = "FILE", value_parser = clap::value_parser!(PathBuf))]
     normal: Option<PathBuf>,
 
-    /// Expected median. This needs to be higher than the median value of the raw counts. Increase if you use panel or amplicon sequencing. (default: 1000)
+    /// Expected median. This needs to be higher than the median value of the raw counts. Increase if you use panel or amplicon sequencing.
     #[arg(long, default_value_t = 1000)]
     median: usize,
 
-    /// Penalty parameter for segmentation. Lower values -> more segments. Higher values -> less segments (default: 10.0)
+    /// Penalty parameter for segmentation. Lower values -> more segments. Higher values -> less segments
     #[arg(long, default_value_t = 10.0)]
     penalty: f64,
 
