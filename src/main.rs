@@ -204,7 +204,7 @@ fn segment_file(
     }
 
     let lines = reader.lines();
-
+    let mut is_sex_chrom = false;
     // Process data lines
     for (line_num, line_result) in lines.enumerate() {
         let line = line_result?;
@@ -245,6 +245,7 @@ fn segment_file(
             }
 
             prev_chr = chr.to_string();
+            is_sex_chrom = matches!(chr, "chrX" | "X" | "chrY" | "Y");
         }
 
         let start = columns[1].trim().parse::<u32>();
@@ -257,7 +258,7 @@ fn segment_file(
                 starts.push(s);
                 ends.push(e);
                 values.push(v);
-                if !["chrX", "X", "chrY", "Y"].contains(&chr) {
+                if !is_sex_chrom {
                     element_count += 1;
                     if index < est_median {
                         median_helper[index] += 1;
