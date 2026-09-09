@@ -4,8 +4,20 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-clap = { version = "4.6.6", features = ["derive"] }
-flate2 = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+flate2 = "1.1"
+atoi = "3.1"
+memchr = "2.8"
+
+[dev-dependencies]
+criterion = "0.7"
+tempfile = "3"
+rand = "0.9"
+rand_distr = "0.5"
+
+[[bench]]
+name = "quickseg_runtime"
+harness = false
 
 [dev-dependencies]
 criterion = "0.7"
@@ -26,3 +38,4 @@ panic = "abort"
 codegen-units = 1
 lto = "fat"
 strip = true
+

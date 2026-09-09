@@ -1,14 +1,14 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::process::Command;
 use tempfile::tempdir;
-use rand::rng;
+use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Binomial, Distribution};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
 fn generate_bed(path: &Path, multi: usize) {
-    let mut rng = rng();
+    let mut rng = StdRng::seed_from_u64(42);
 
     let blocks = [
         (200, 40 * multi),
@@ -48,7 +48,7 @@ fn benchmark_quickseg(c: &mut Criterion) {
 
     let input = tmp.path().join("input.bed");
 
-    generate_bed(&input, 100_000);
+    generate_bed(&input, 10_000);
 
     c.bench_function("quickseg_large", |b| {
         b.iter(|| {
