@@ -7,8 +7,7 @@ use flate2::read::MultiGzDecoder;
 // use std::time::Instant;
 use atoi::FromRadix10;
 
-mod segmentation;
-use segmentation::segment_forward;
+use quickseg_core::*;
 
 mod bufreader;
 use bufreader::CompactBufReader;
@@ -17,10 +16,6 @@ macro_rules! debug_println {
     ($($arg:tt)*) => (if ::std::cfg!(debug_assertions) { ::std::println!($($arg)*); })
 }
 
-#[inline]
-fn get_bit(bits: &[u64], idx: usize) -> bool {
-    (bits[idx / 64] & (1u64 << (idx % 64))) != 0
-}
 
 /// Segment read counts into copy number segments
 #[derive(Parser, Debug)]
@@ -499,60 +494,6 @@ fn normalize_chromosome(
         seg_values,
         norm_values,
     })
-}
-
-fn segment_chromosome(
-    norm_values: &[f64],
-    seg_values: &[f64],
-    penalty: f64,
-) -> (Vec<usize>, Vec<f64>) {
-
-    let n = norm_values.len();
-    let s = seg_values.len();
-
-    let mut out_index = vec![0; n];
-    let mut out_values = vec![0.0; n];
-
-    let num_bits = s * n;
-    let mut backbool = vec![0u64; num_bits.div_ceil(64)];
-
-    let mut backidx = vec![0usize; n];
-    let mut breakidx = vec![0usize; n];
-
-    segment_forward(
-        norm_values,
-        seg_values,
-        penalty,
-        &mut backbool,
-        &mut backidx,
-    );
-
-    let mut b = 1;
-
-    breakidx[0] = n;
-    let mut maxixtmp = backidx[n - 1];
-
-    for i in (1..n).rev() {
-        if get_bit(&backbool, i * s + maxixtmp) {
-            maxixtmp = backidx[i - 1];
-            breakidx[b] = i;
-            b += 1;
-        }
-    }
-
-    out_index[0] = 0;
-    out_values[0] = seg_values[backidx[breakidx[b - 1] - 1]];
-
-    for i in (0..b - 1).rev() {
-        out_index[b - (i + 1)] = breakidx[i + 1];
-        out_values[b - (i + 1)] =
-            seg_values[backidx[breakidx[i] - 1]];
-    }
-
-    out_index.truncate(b);
-    out_values.truncate(b);
-
-    (out_index, out_values)
 }
 
 

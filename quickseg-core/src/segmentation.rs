@@ -1,70 +1,184 @@
 
 #[inline]
-pub fn set_bit(bits: &mut [u64], idx: usize) {
-    bits[idx / 64] |= 1u64 << (idx % 64);
+pub fn set_bit(bits: &mut [u8], idx: usize) {
+    bits[idx / 8] |= 1u8 << (idx % 8);
 }
 
+#[inline]
+fn get_bit(bits: &[u8], idx: usize) -> bool {
+    (bits[idx / 8] & (1u8 << (idx % 8))) != 0
+}
 
-pub fn segment_forward(
-    norm_values: &[f64],
+pub fn segment_chromosome(
+    values: &[f64],
     seg_values: &[f64],
     penalty: f64,
-    backbool: &mut [u64],
-    backidx: &mut [usize],
-) {
+) -> (Vec<usize>, Vec<f64>) {
 
-#[cfg(target_arch = "x86_64")]
-{
-    if std::arch::is_x86_feature_detected!("avx512f") {
-        return unsafe {
-            segment_forward_asm_avx512(
-                norm_values,
-                seg_values,
-                penalty,
-                backbool,
-                backidx,
-            )
-        };
+    assert!(
+        !seg_values.is_empty(),
+        "seg_values must not be empty"
+    );
+
+    assert!(
+        !values.is_empty(),
+        "Values must not be empty"
+    );
+
+    let mut seg_values = seg_values.to_vec();
+    let padded_len = seg_values.len().next_multiple_of(8);
+    // Pad with +inf so the SIMD implementations can process
+    // full 8-wide vectors without affecting the argmin.
+    seg_values.resize(padded_len, f64::INFINITY);
+
+    let n = values.len();
+    let s = seg_values.len();
+
+    let num_bits = s * n;
+    // this would need div_ceil(8), but we ensure above that s is a multiple of 8
+    let mut backbool = vec![0u8; num_bits / 8];
+    let mut backidx = vec![0usize; n];
+    let mut breakidx = vec![0usize; n];
+
+    segment_forward(
+        values,
+        &seg_values,
+        penalty,
+        &mut backbool,
+        &mut backidx,
+    );
+
+    let mut b = 1;
+
+    breakidx[0] = n;
+    let mut state = backidx[n - 1];
+
+    for i in (1..n).rev() {
+        if get_bit(&backbool, i * s + state) {
+            state = backidx[i - 1];
+            breakidx[b] = i;
+            b += 1;
+        }
     }
 
-    if std::arch::is_x86_feature_detected!("avx2") {
-        return unsafe {
-            segment_forward_asm_avx2(
-                norm_values,
-                seg_values,
-                penalty,
-                backbool,
-                backidx,
-            )
-        };
+    let mut out_index = vec![0usize; b];
+    let mut out_values = vec![0.0; b];
+
+    // breakidx stores breakpoints in reverse order with a sentinel at position 0.
+    for i in 0..b {
+        out_index[i] = breakidx[b - i];
+        out_values[i] = seg_values[backidx[breakidx[b - i - 1] - 1]];
     }
+
+    (out_index, out_values)
 }
 
-segment_forward_base(
-    norm_values,
-    seg_values,
-    penalty,
-    backbool,
-    backidx,
-)
+pub fn segment_forward(
+    values: &[f64],
+    seg_values: &[f64],
+    penalty: f64,
+    backbool: &mut [u8],
+    backidx: &mut [usize],
+) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if let Ok(backend) = std::env::var("QUICKSEG_BACKEND") {
+            match backend.as_str() {
+                "scalar" => {
+                    return segment_forward_base(
+                        values,
+                        seg_values,
+                        penalty,
+                        backbool,
+                        backidx,
+                    );
+                }
+                "avx2" => {
+                    assert!(
+                        std::arch::is_x86_feature_detected!("avx2"),
+                        "QUICKSEG_BACKEND=avx2 but AVX2 is not supported by this CPU"
+                    );
+
+                    return unsafe {
+                        segment_forward_asm_avx2(
+                            values,
+                            seg_values,
+                            penalty,
+                            backbool,
+                            backidx,
+                        )
+                    };
+                }
+                "avx512" => {
+                    assert!(
+                        std::arch::is_x86_feature_detected!("avx512f"),
+                        "QUICKSEG_BACKEND=avx512 but AVX512 is not supported by this CPU"
+                    );
+
+                    return unsafe {
+                        segment_forward_asm_avx512(
+                            values,
+                            seg_values,
+                            penalty,
+                            backbool,
+                            backidx,
+                        )
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        if std::arch::is_x86_feature_detected!("avx512f") {
+            return unsafe {
+                segment_forward_asm_avx512(
+                    values,
+                    seg_values,
+                    penalty,
+                    backbool,
+                    backidx,
+                )
+            };
+        }
+
+        if std::arch::is_x86_feature_detected!("avx2") {
+            return unsafe {
+                segment_forward_asm_avx2(
+                    values,
+                    seg_values,
+                    penalty,
+                    backbool,
+                    backidx,
+                )
+            };
+        }
+    }
+
+    segment_forward_base(
+        values,
+        seg_values,
+        penalty,
+        backbool,
+        backidx,
+    )
 }
 
 fn segment_forward_base(
-    norm_values: &[f64],
+    values: &[f64],
     seg_values: &[f64],
     penalty: f64,
-    backbool: &mut [u64],
+    backbool: &mut [u8],
     backidx: &mut [usize],
 ){
 
-    let n = norm_values.len();
+    let n = values.len();
     let s = seg_values.len();
 
     let mut score = vec![0.0; s];
     let mut minscore = f64::INFINITY;
 
     for i in 0..n {
-        let v = norm_values[i];
+        let v = values[i];
         let mut jmin = f64::INFINITY;
 
         for j in 0..s {
@@ -88,17 +202,17 @@ fn segment_forward_base(
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn segment_forward_asm_avx2(
-    norm_values: &[f64],
+    values: &[f64],
     seg_values: &[f64],
     penalty: f64,
-    backbool: &mut [u64],
+    backbool: &mut [u8],
     backidx: &mut [usize],
 ) {
-    let n = norm_values.len();
+    let n = values.len();
     let s = seg_values.len();
     let mut score = vec![0.0; s];
 
-    let values_ptr = norm_values.as_ptr();
+    let values_ptr = values.as_ptr();
     let seg_ptr = seg_values.as_ptr();
     let score_ptr = score.as_mut_ptr();
     let bits_ptr = backbool.as_mut_ptr();
@@ -277,17 +391,17 @@ static IDX_BASE: AlignedIdxBase =
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512dq,avx512vl")]
 unsafe fn segment_forward_asm_avx512(
-    norm_values: &[f64],
+    values: &[f64],
     seg_values: &[f64],
     penalty: f64,
-    backbool: &mut [u64],
+    backbool: &mut [u8],
     backidx: &mut [usize],
 )  {
-    let n = norm_values.len();
+    let n = values.len();
     let s = seg_values.len();
     let mut score = vec![0.0; s];
 
-    let values_ptr = norm_values.as_ptr();
+    let values_ptr = values.as_ptr();
     let seg_ptr = seg_values.as_ptr();
     let score_ptr = score.as_mut_ptr();
     let bits_ptr = backbool.as_mut_ptr();

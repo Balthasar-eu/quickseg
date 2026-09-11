@@ -1,0 +1,15 @@
+[package]
+name = "quickseg-core"
+version = "1.0.0"
+edition = "2024"
+
+[lib]
+name = "quickseg_core"
+path = "src/lib.rs"
+
+[dev-dependencies]
+criterion = "0.8"
+tempfile = "3"
+rand = "0.10"
+rand_distr = "0.6"
+

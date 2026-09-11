@@ -1,0 +1,13 @@
+[package]
+name = "quickseg-python"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "quickseg"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.29", features = ["extension-module"] }
+numpy = "0.29"
+quickseg-core = { path = "../quickseg-core" }
